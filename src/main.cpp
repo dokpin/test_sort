@@ -28,9 +28,11 @@
 #include <io.h>    // to check file existence using POSIX function access(). On Linux include <unistd.h>.
 #include <set>
 
+#include <filesystem> // using C++17
 #include "Hungarian.h"
 #include "KalmanTracker.h"
 
+#include <opencv2/opencv.hpp>
 #include "opencv2/video/tracking.hpp"
 #include "opencv2/highgui/highgui.hpp"
 
@@ -66,18 +68,270 @@ int total_frames = 0;
 double total_time = 0.0;
 
 void TestSORT(string seqName, bool display);
+void readImage(std::string directory, std::vector<std::string>& imageList);
 
 
+
+
+//int main()
+//{
+//	vector<string> sequences = { "PETS09-S2L1", "TUD-Campus", "TUD-Stadtmitte", "ETH-Bahnhof", "ETH-Sunnyday", "ETH-Pedcross2", "KITTI-13", "KITTI-17", "ADL-Rundle-6", "ADL-Rundle-8", "Venice-2" };
+//	for (auto seq : sequences)
+//		TestSORT(seq, true);
+//	//TestSORT("PETS09-S2L1", true);
+//
+//	// Note: time counted here is of tracking procedure, while the running speed bottleneck is opening and parsing detectionFile.
+//	cout << "Total Tracking took: " << total_time << " for " << total_frames << " frames or " << ((double)total_frames / (double)total_time) << " FPS" << endl;
+//
+//	return 0;
+//}
+
+struct detectionResult
+{
+	cv::Rect plateRect;
+	double confidence;
+	int type;
+};
+void NMS(std::vector<detectionResult>& vResultRect);
 
 int main()
 {
-	vector<string> sequences = { "PETS09-S2L1", "TUD-Campus", "TUD-Stadtmitte", "ETH-Bahnhof", "ETH-Sunnyday", "ETH-Pedcross2", "KITTI-13", "KITTI-17", "ADL-Rundle-6", "ADL-Rundle-8", "Venice-2" };
-	for (auto seq : sequences)
-		TestSORT(seq, true);
-	//TestSORT("PETS09-S2L1", true);
+	using namespace cv::dnn;
+	const float confidenceThreshold = 0.24f;
+	Net m_net;
+	
+	std::string yolo_cfg = "./data/yolov3.cfg";
+	std::string yolo_weights = "./data/yolov3.weights";
+	m_net = readNetFromDarknet(yolo_cfg, yolo_weights);
+	m_net.setPreferableBackend(DNN_BACKEND_OPENCV);
+	m_net.setPreferableTarget(DNN_TARGET_CPU);
 
-	// Note: time counted here is of tracking procedure, while the running speed bottleneck is opening and parsing detectionFile.
-	cout << "Total Tracking took: " << total_time << " for " << total_frames << " frames or " << ((double)total_frames / (double)total_time) << " FPS" << endl;
+	vector<string> vimages;
+	readImage("./data/PETS09-S2L1", vimages);
+
+	// 0. randomly generate colors, only for display
+	RNG rng(0xFFFFFFFF);
+	Scalar_<int> randColor[CNUM];
+	for (int i = 0; i < CNUM; i++)
+		rng.fill(randColor[i], RNG::UNIFORM, 0, 256);
+
+	// 3. update across frames
+	int frame_count = 0;
+	int max_age = 1;
+	int min_hits = 3;
+	double iouThreshold = 0.3;
+	vector<KalmanTracker> trackers;
+	KalmanTracker::kf_count = 0; // tracking id relies on this, so we have to reset it in each seq.
+
+	// variables used in the for-loop
+	vector<Rect_<float>> predictedBoxes;
+	vector<vector<double>> iouMatrix;
+	vector<int> assignment;
+	set<int> unmatchedDetections;
+	set<int> unmatchedTrajectories;
+	set<int> allItems;
+	set<int> matchedItems;
+	vector<cv::Point> matchedPairs;
+	vector<TrackingBox> frameTrackingResult;
+	unsigned int trkNum = 0;
+	unsigned int detNum = 0;
+
+	double cycle_time = 0.0;
+	int64 start_time = 0;
+
+	for (int i = 0; i < vimages.size(); i++)
+	{
+		Mat img = imread("./data/PETS09-S2L1/" + vimages[i]);
+		Mat inputBlob = blobFromImage(img, 1 / 255.F, cv::Size(416, 416), cv::Scalar(), true, false);
+
+		m_net.setInput(inputBlob);
+
+		std::vector<cv::Mat> outs;
+
+		cv::Mat detectionMat = m_net.forward();
+
+		std::vector<detectionResult> vResultRect;
+
+		for (int i = 0; i < detectionMat.rows; i++)
+		{
+			const int probability_index = 5;
+			const int probability_size = detectionMat.cols - probability_index;
+			float* prob_array_ptr = &detectionMat.at<float>(i, probability_index);
+			size_t objectClass = std::max_element(prob_array_ptr, prob_array_ptr + probability_size) - prob_array_ptr;
+			float confidence = detectionMat.at<float>(i, (int)objectClass + probability_index);
+			if (confidence > confidenceThreshold)
+			{
+				float x_center = detectionMat.at<float>(i, 0) * (float)img.cols;
+				float y_center = detectionMat.at<float>(i, 1) * (float)img.rows;
+				float width = detectionMat.at<float>(i, 2) * (float)img.cols;
+				float height = detectionMat.at<float>(i, 3) * (float)img.rows;
+				cv::Point2i p1(round(x_center - width / 2.f), round(y_center - height / 2.f));
+				cv::Point2i p2(round(x_center + width / 2.f), round(y_center + height / 2.f));
+				cv::Rect2i object(p1, p2);
+
+				detectionResult tmp;
+				tmp.plateRect = object;
+				tmp.confidence = confidence;
+				tmp.type = objectClass;
+				vResultRect.push_back(tmp);
+			}
+		}
+
+		NMS(vResultRect);
+
+		for (int j = 0; j < vResultRect.size(); j++)
+		{
+			cv::rectangle(img, vResultRect[j].plateRect, cv::Scalar(0, 0, 255), 2);
+			printf("index: %d, confidence: %g\n", vResultRect[j].type, vResultRect[j].confidence);
+		}
+
+		total_frames++;
+		frame_count++;
+
+		if (trackers.size() == 0) // the first frame met
+		{
+			// initialize kalman trackers using first detections.
+			for (int j = 0; j < vResultRect.size(); j++)
+			{
+				KalmanTracker trk = KalmanTracker(vResultRect[j].plateRect);
+				printf("칼만 트래커 초기화\n");
+				trackers.push_back(trk);
+				break;
+			}
+		}
+
+		// 3.1. get predicted locations from existing trackers.
+		predictedBoxes.clear();
+
+		for (auto it = trackers.begin(); it != trackers.end();)
+		{
+			Rect_<float> pBox = (*it).predict();
+			if (pBox.x >= 0 && pBox.y >= 0)
+			{
+				predictedBoxes.push_back(pBox);
+				it++;
+			}
+			else
+			{
+				it = trackers.erase(it);
+				//cerr << "Box invalid at frame: " << frame_count << endl;
+			}
+		}
+
+		///////////////////////////////////////
+		// 3.2. associate detections to tracked object (both represented as bounding boxes)
+		// dets : detFrameData[fi]
+		trkNum = predictedBoxes.size();
+		detNum = vResultRect.size();
+
+		iouMatrix.clear();
+		iouMatrix.resize(trkNum, vector<double>(detNum, 0));
+
+		for (unsigned int t = 0; t < trkNum; t++) // compute iou matrix as a distance matrix
+		{
+			for (unsigned int j = 0; j < detNum; j++)
+			{
+				// use 1-iou because the hungarian algorithm computes a minimum-cost assignment.
+				iouMatrix[t][j] = 1 - GetIOU(predictedBoxes[t], vResultRect[j].plateRect);
+			}
+		}
+
+		// solve the assignment problem using hungarian algorithm.
+		// the resulting assignment is [track(prediction) : detection], with len=preNum
+		HungarianAlgorithm HungAlgo;
+		assignment.clear();
+		HungAlgo.Solve(iouMatrix, assignment);
+
+		// find matches, unmatched_detections and unmatched_predictions
+		unmatchedTrajectories.clear();
+		unmatchedDetections.clear();
+		allItems.clear();
+		matchedItems.clear();
+
+		if (detNum > trkNum) //	there are unmatched detections
+		{
+			for (unsigned int n = 0; n < detNum; n++)
+				allItems.insert(n);
+
+			for (unsigned int t = 0; t < trkNum; ++t)
+				matchedItems.insert(assignment[t]);
+
+			set_difference(allItems.begin(), allItems.end(),
+				matchedItems.begin(), matchedItems.end(),
+				insert_iterator<set<int>>(unmatchedDetections, unmatchedDetections.begin()));
+		}
+		else if (detNum < trkNum) // there are unmatched trajectory/predictions
+		{
+			for (unsigned int t = 0; t < trkNum; ++t)
+				if (assignment[t] == -1) // unassigned label will be set as -1 in the assignment algorithm
+					unmatchedTrajectories.insert(t);
+		}
+		else
+			;
+
+		// filter out matched with low IOU
+		matchedPairs.clear();
+		for (unsigned int t = 0; t < trkNum; ++t)
+		{
+			if (assignment[t] == -1) // pass over invalid values
+				continue;
+			if (1 - iouMatrix[t][assignment[t]] < iouThreshold)
+			{
+				unmatchedTrajectories.insert(t);
+				unmatchedDetections.insert(assignment[t]);
+			}
+			else
+				matchedPairs.push_back(cv::Point(i, assignment[t]));
+		}
+
+		///////////////////////////////////////
+		// 3.3. updating trackers
+
+		// update matched trackers with assigned detections.
+		// each prediction is corresponding to a tracker
+		int detIdx, trkIdx;
+		for (unsigned int t = 0; t < matchedPairs.size(); t++)
+		{
+			trkIdx = matchedPairs[t].x;
+			detIdx = matchedPairs[t].y;
+			trackers[trkIdx].update(vResultRect[detIdx].plateRect);
+		}
+
+		// create and initialise new trackers for unmatched detections
+		for (auto umd : unmatchedDetections)
+		{
+			KalmanTracker tracker = KalmanTracker(vResultRect[umd].plateRect);
+			trackers.push_back(tracker);
+		}
+
+		// get trackers' output
+		frameTrackingResult.clear();
+		for (auto it = trackers.begin(); it != trackers.end();)
+		{
+			if (((*it).m_time_since_update < 1) &&
+				((*it).m_hit_streak >= min_hits || frame_count <= min_hits))
+			{
+				TrackingBox res;
+				res.box = (*it).get_state();
+				res.id = (*it).m_id + 1;
+				res.frame = frame_count;
+				frameTrackingResult.push_back(res);
+				it++;
+			}
+			else
+				it++;
+
+			// remove dead tracklet
+			if (it != trackers.end() && (*it).m_time_since_update > max_age)
+				it = trackers.erase(it);
+		}
+
+		//cycle_time = (double)(getTickCount() - start_time);
+		//total_time += cycle_time / getTickFrequency();
+
+	}
+
+
 
 	return 0;
 }
@@ -370,4 +624,50 @@ void TestSORT(string seqName, bool display)
 
 	if (display)
 		destroyAllWindows();
+}
+
+void readImage(std::string directory, std::vector<std::string>& imageList)
+{
+	std::filesystem::path someDir(directory);
+	std::filesystem::directory_iterator end_iter;
+	std::vector<std::string> vc;
+
+	for (std::filesystem::directory_iterator dir_iter(someDir); dir_iter != end_iter; ++dir_iter)
+	{
+		if (std::filesystem::is_regular_file(dir_iter->status()))
+		{
+			//printf("%s\n", dir_iter->path().filename() );
+			if ((dir_iter->path().filename().generic_string().substr(dir_iter->path().filename().generic_string().length() - 3, 3) != "jpg")
+				&& (dir_iter->path().filename().generic_string().substr(dir_iter->path().filename().generic_string().length() - 3, 3) != "png")
+				&& (dir_iter->path().filename().generic_string().substr(dir_iter->path().filename().generic_string().length() - 3, 3) != "bmp")
+				&& (dir_iter->path().filename().generic_string().substr(dir_iter->path().filename().generic_string().length() - 3, 3) != "tiff"))
+				continue;
+			//printf("%s\n", dir_iter->path().filename().generic_string().c_str());
+			imageList.push_back(dir_iter->path().filename().generic_string());
+		}
+	}
+	return;
+}
+
+void NMS(std::vector<detectionResult>& vResultRect)
+{
+	for (int i = 0; i < vResultRect.size() - 1; i++)
+	{
+		for (int j = i + 1; j < vResultRect.size(); j++)
+		{
+			double IOURate = (double)(vResultRect[i].plateRect & vResultRect[j].plateRect).area() / (vResultRect[i].plateRect | vResultRect[j].plateRect).area();
+			if (IOURate >= 0.5)
+			{
+				if (vResultRect[i].confidence > vResultRect[j].confidence) {
+					vResultRect.erase(vResultRect.begin() + j);
+					j--;
+				}
+				else {
+					vResultRect.erase(vResultRect.begin() + i);
+					i--;
+					break;
+				}
+			}
+		}
+	}
 }

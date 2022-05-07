@@ -1151,3 +1151,6 @@ x64/Release/test_sort.exe
 x64/Release/main.obj
 x64/Release/KalmanTracker.obj
 x64/Release/Hungarian.obj
+data/yolov3.weights
+.vs/test_sort/v17/.suo
+data/yolov3.cfg
