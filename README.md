@@ -5,3 +5,4 @@
  ## È¯°æ
  Visual Studio 2022<br/>
  OpenCV4.5.5(prebuild)<br/>
+ C++17<br/>

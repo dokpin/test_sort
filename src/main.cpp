@@ -173,6 +173,7 @@ int main()
 				tmp.plateRect = object;
 				tmp.confidence = confidence;
 				tmp.type = objectClass;
+				if (tmp.type != 0) continue;
 				vResultRect.push_back(tmp);
 			}
 		}
@@ -184,6 +185,9 @@ int main()
 			cv::rectangle(img, vResultRect[j].plateRect, cv::Scalar(0, 0, 255), 2);
 			printf("index: %d, confidence: %g\n", vResultRect[j].type, vResultRect[j].confidence);
 		}
+
+		imshow("test", img);
+		waitKey(1);
 
 		total_frames++;
 		frame_count++;
@@ -214,7 +218,7 @@ int main()
 			else
 			{
 				it = trackers.erase(it);
-				//cerr << "Box invalid at frame: " << frame_count << endl;
+				cerr << "Box invalid at frame: " << frame_count << endl;
 			}
 		}
 
@@ -304,27 +308,27 @@ int main()
 			trackers.push_back(tracker);
 		}
 
-		// get trackers' output
-		frameTrackingResult.clear();
-		for (auto it = trackers.begin(); it != trackers.end();)
-		{
-			if (((*it).m_time_since_update < 1) &&
-				((*it).m_hit_streak >= min_hits || frame_count <= min_hits))
-			{
-				TrackingBox res;
-				res.box = (*it).get_state();
-				res.id = (*it).m_id + 1;
-				res.frame = frame_count;
-				frameTrackingResult.push_back(res);
-				it++;
-			}
-			else
-				it++;
+		//// get trackers' output
+		//frameTrackingResult.clear();
+		//for (auto it = trackers.begin(); it != trackers.end();)
+		//{
+		//	if (((*it).m_time_since_update < 1) &&
+		//		((*it).m_hit_streak >= min_hits || frame_count <= min_hits))
+		//	{
+		//		TrackingBox res;
+		//		res.box = (*it).get_state();
+		//		res.id = (*it).m_id + 1;
+		//		res.frame = frame_count;
+		//		frameTrackingResult.push_back(res);
+		//		it++;
+		//	}
+		//	else
+		//		it++;
 
-			// remove dead tracklet
-			if (it != trackers.end() && (*it).m_time_since_update > max_age)
-				it = trackers.erase(it);
-		}
+		//	// remove dead tracklet
+		//	if (it != trackers.end() && (*it).m_time_since_update > max_age)
+		//		it = trackers.erase(it);
+		//}
 
 		//cycle_time = (double)(getTickCount() - start_time);
 		//total_time += cycle_time / getTickFrequency();
